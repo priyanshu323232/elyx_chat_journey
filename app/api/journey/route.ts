@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { ChatRow, JourneyOutput } from "@/lib/types";
+import { generateWithFallback, compactMessages } from "@/lib/gemini";
 
 export const runtime = "nodejs";
 
@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
     const messages: ChatRow[] = body?.messages;
     const memberName: string = body?.memberName ?? "Member";
     const timezone: string = body?.timezone ?? "Asia/Singapore";
-    
+
     if (!Array.isArray(messages) || messages.length === 0) {
       return NextResponse.json({ error: "messages[] required" }, { status: 400 });
     }
@@ -32,40 +32,31 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Google API key not configured" }, { status: 500 });
     }
 
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro-latest" });
+    // Compact to avoid token/PM limits
+    const compact = compactMessages(messages);
+    const input = { member_name: memberName, timezone, messages: compact };
+    const prompt = `${SYSTEM}\n\nInput JSON:\n${JSON.stringify(input)}`;
 
-    const input = { member_name: memberName, timezone, messages };
-    const prompt = `${SYSTEM}\n\nInput JSON:\n${JSON.stringify(input).slice(0, 800000)}`;
+    // Try pro, fall back to flash automatically on 429/quota
+    const { text, modelUsed } = await generateWithFallback({ apiKey, prompt });
 
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
-    
-    // Try to parse as JSON
+    // Parse response (JSON or fenced JSON)
     try {
       const json = JSON.parse(text) as JourneyOutput;
-      return NextResponse.json(json);
-    } catch (parseError) {
-      // Fallback: try to extract JSON from markdown code blocks
+      return NextResponse.json(json, { status: 200, headers: { "x-gemini-model": modelUsed } });
+    } catch {
       const jsonMatch = text.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/);
       if (jsonMatch) {
-        try {
-          const json = JSON.parse(jsonMatch[1]) as JourneyOutput;
-          return NextResponse.json(json);
-        } catch (e) {
-          // Still failed
-        }
+        const json = JSON.parse(jsonMatch[1]) as JourneyOutput;
+        return NextResponse.json(json, { status: 200, headers: { "x-gemini-model": modelUsed } });
       }
-      
-      return NextResponse.json({ 
-        error: "Model did not return valid JSON", 
-        raw: text.slice(0, 1000) + "..." 
-      }, { status: 422 });
+      return NextResponse.json(
+        { error: "Model did not return valid JSON", raw: text.slice(0, 1000) + "..." },
+        { status: 422, headers: { "x-gemini-model": modelUsed } }
+      );
     }
   } catch (e: any) {
     console.error("Journey API error:", e);
-    return NextResponse.json({ 
-      error: e.message || "Unknown error occurred" 
-    }, { status: 500 });
+    return NextResponse.json({ error: e.message || "Unknown error occurred" }, { status: 500 });
   }
 }
