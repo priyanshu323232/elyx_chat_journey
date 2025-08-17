@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { ChatRow } from "@/lib/types";
+import { generateWithFallback, compactMessages } from "@/lib/gemini";
 
 export const runtime = "nodejs";
 
@@ -26,19 +26,15 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Google API key not configured" }, { status: 500 });
     }
 
-    const input = { week_range: weekRange, messages, prior_timeline: priorTimeline };
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro-latest" });
-    
-    const prompt = `${ROLE}\n\nInputs JSON:\n${JSON.stringify(input).slice(0, 200000)}`;
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
-    
-    return NextResponse.json({ text });
+    const compact = compactMessages(messages);
+    const input = { week_range: weekRange, messages: compact, prior_timeline: priorTimeline };
+    const prompt = `${ROLE}\n\nInputs JSON:\n${JSON.stringify(input)}`;
+
+    const { text, modelUsed } = await generateWithFallback({ apiKey, prompt });
+
+    return NextResponse.json({ text }, { status: 200, headers: { "x-gemini-model": modelUsed } });
   } catch (e: any) {
     console.error("Weekly summary API error:", e);
-    return NextResponse.json({ 
-      error: e.message || "Unknown error occurred" 
-    }, { status: 500 });
+    return NextResponse.json({ error: e.message || "Unknown error occurred" }, { status: 500 });
   }
 }
